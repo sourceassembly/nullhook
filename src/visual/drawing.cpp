@@ -644,8 +644,6 @@ void InitGL()
     logging::Info("InitGL: imgui ready");
 #elif ENABLE_GLEZ_DRAWING
     glClearColor(1.0, 0.0, 0.0, 0.5);
-    glewExperimental = GL_TRUE;
-    glewInit();
     glez::init(draw::width, draw::height);
 #endif
 #endif
