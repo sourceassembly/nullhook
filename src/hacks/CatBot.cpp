@@ -27,6 +27,8 @@ static settings::Int abandon_if_ipc_bots_gte{ "cat-bot.abandon-if.ipc-bots-gte",
 static settings::Int abandon_if_humans_lte{ "cat-bot.abandon-if.humans-lte", "0" };
 static settings::Int abandon_if_players_lte{ "cat-bot.abandon-if.players-lte", "0" };
 static settings::Boolean abandon_if_no_navmesh{ "cat-bot.abandon-if.no-navmesh", "false" };
+static settings::Boolean requeue_without_abandon{ "cat-bot.requeue-without-abandon", "false" };
+static settings::Int requeue_if_ipc_bots_gt{ "cat-bot.requeue-if.ipc-bots-gt", "0" };
 
 static settings::Boolean micspam{ "cat-bot.micspam.enable", "false" };
 static settings::Int micspam_on{ "cat-bot.micspam.interval-on", "3" };
@@ -553,6 +555,8 @@ static Timer waiting_for_quit_timer{};
 
 static std::vector<unsigned> ipc_blacklist{};
 
+static bool requeue_active{ false };
+
 #if ENABLE_IPC
 void update_ipc_data(ipc::user_data_s &data)
 {
@@ -803,11 +807,9 @@ void update()
             reset();
             break;
         }
-        if (CE_BAD(LOCAL_E))
+        if (!g_pPlayerResource)
             break;
-        if (g_pLocalPlayer->team == TEAM_UNK || g_pLocalPlayer->team == TEAM_SPEC || g_pLocalPlayer->clazz == 0)
-            break;
-        logging::Info("autoqueue-report: class chosen, settling in before reporting");
+        logging::Info("autoqueue-report: connected, settling in before reporting");
         settle_tries   = 0;
         last_connected = 0;
         stable_ticks   = 0;
@@ -1016,6 +1018,9 @@ static void cm()
     if (g_Settings.bInvalid)
         return;
 
+    if (*autoReport && !*autoqueue_report && report_timer.test_and_set(60000))
+        reportall();
+
     if (CE_BAD(LOCAL_E) || CE_BAD(LOCAL_W))
         return;
 
@@ -1030,13 +1035,62 @@ static void cm()
         int classtojoin    = classes[rand() % 3];
         g_IEngine->ClientCmd_Unrestricted(format("disguise ", classtojoin, " ", teamtodisguise).c_str());
     }
-    if (*autoReport && !*autoqueue_report && report_timer.test_and_set(60000))
-        reportall();
 }
 
 static Timer unstuck{};
 static int unstucks;
 static Timer report_timer2{};
+
+static bool partyInQueue()
+{
+    re::CTFPartyClient *pc = re::CTFPartyClient::GTFPartyClient();
+    return pc && (pc->BInQueueForMatchGroup(tfmm::getQueue()) || pc->BInQueueForStandby());
+}
+
+static bool partyQueueRequestPending()
+{
+    re::CTFPartyClient *pc = re::CTFPartyClient::GTFPartyClient();
+    return pc && pc->BQueueRequestPending(tfmm::getQueue());
+}
+
+static void requeueStayingInMatch()
+{
+    if (!partyInQueue() && !partyQueueRequestPending())
+        tfmm::startQueue();
+    requeue_active = true;
+}
+
+static void abandon_or_requeue(const std::string &reason)
+{
+    if (*requeue_without_abandon)
+    {
+        if (!requeue_active)
+            logging::Info("Requeueing without abandon, staying in match: %s", reason.c_str());
+        requeueStayingInMatch();
+    }
+    else
+    {
+        logging::Info("Abandoning: %s", reason.c_str());
+        requeue_active = false;
+        tfmm::abandon();
+    }
+}
+
+static bool any_requeue_condition(int count_total, int count_ipc)
+{
+    if (abandon_if_ipc_bots_gte && count_ipc >= int(abandon_if_ipc_bots_gte))
+        return true;
+    if (abandon_if_humans_lte && count_total - count_ipc <= int(abandon_if_humans_lte))
+        return true;
+    if (abandon_if_players_lte && count_total <= int(abandon_if_players_lte))
+        return true;
+    if (*abandon_if_no_navmesh && !tfmm::isLoadingMap() && !navparser::NavEngine::hasNavMesh())
+        return true;
+    if (requeue_if_ipc_bots_gt && count_ipc > int(requeue_if_ipc_bots_gt))
+        return true;
+    return false;
+}
+
 void update()
 {
     if (g_Settings.bInvalid)
@@ -1088,7 +1142,7 @@ void update()
 
     if (random_votekicks && timer_votekicks.test_and_set(5000))
         do_random_votekick();
-    if (timer_abandon.test_and_set(2000) && level_init_timer.check(13000))
+    if (timer_abandon.test_and_set(1000) && level_init_timer.check(13000))
     {
         count_ipc = 0;
         ipc_list.clear();
@@ -1154,10 +1208,7 @@ void update()
                     waiting_for_quit_bool = false;
                     ipc_blacklist.clear();
 
-                    logging::Info("Abandoning because there are %d local players "
-                                  "in game, and abandon_if_ipc_bots_gte is %d.",
-                                  count_ipc, int(abandon_if_ipc_bots_gte));
-                    tfmm::abandon();
+                    abandon_or_requeue(format("there are ", count_ipc, " local players in game, and abandon_if_ipc_bots_gte is ", int(abandon_if_ipc_bots_gte), "."));
                     return;
                 }
                 else
@@ -1191,10 +1242,7 @@ void update()
         {
             if (count_total - count_ipc <= int(abandon_if_humans_lte))
             {
-                logging::Info("Abandoning because there are %d non-bots in "
-                              "game, and abandon_if_humans_lte is %d.",
-                              count_total - count_ipc, int(abandon_if_humans_lte));
-                tfmm::abandon();
+                abandon_or_requeue(format("there are ", count_total - count_ipc, " non-bots in game, and abandon_if_humans_lte is ", int(abandon_if_humans_lte), "."));
                 return;
             }
         }
@@ -1202,18 +1250,31 @@ void update()
         {
             if (count_total <= int(abandon_if_players_lte))
             {
-                logging::Info("Abandoning because there are %d total players "
-                              "in game, and abandon_if_players_lte is %d.",
-                              count_total, int(abandon_if_players_lte));
-                tfmm::abandon();
+                abandon_or_requeue(format("there are ", count_total, " total players in game, and abandon_if_players_lte is ", int(abandon_if_players_lte), "."));
                 return;
             }
         }
         if (*abandon_if_no_navmesh && !tfmm::isLoadingMap() && !navparser::NavEngine::hasNavMesh())
         {
-            logging::Info("Abandoning because the current map has no navmesh.");
-            tfmm::abandon();
+            abandon_or_requeue("the current map has no navmesh.");
             return;
+        }
+        if (requeue_if_ipc_bots_gt && count_ipc > int(requeue_if_ipc_bots_gt))
+        {
+            if (!requeue_active)
+                logging::Info("Requeueing because there are %d IPC bots in game, and requeue-if.ipc-bots-gt is %d, staying in match.", count_ipc, int(requeue_if_ipc_bots_gt));
+            requeueStayingInMatch();
+            return;
+        }
+        if (requeue_active && !any_requeue_condition(count_total, count_ipc))
+        {
+            if (partyInQueue())
+            {
+                logging::Info("Cancelling queue, match is acceptable now (humans %d, ipc %d, total %d).", count_total - count_ipc, count_ipc, count_total);
+                tfmm::leaveQueue();
+            }
+            else if (!partyQueueRequestPending())
+                requeue_active = false;
         }
     }
 }
@@ -1227,6 +1288,7 @@ void init()
 void level_init()
 {
     deaths = 0;
+    requeue_active = false;
     level_init_timer.update();
     autoqueue_report_state::onLevelInit();
 }

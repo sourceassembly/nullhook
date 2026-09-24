@@ -43,6 +43,23 @@ static int party_queue_off()
     return off;
 }
 
+static int party_pending_off()
+{
+    static int off = []() -> int {
+        auto *code = reinterpret_cast<uint8_t *>(gSignatures.GetClientSignature(sigs::request_queue_for_match));
+        if (code)
+        {
+            for (int i = 0; i < 0x88; ++i)
+            {
+                if (code[i] == 0x41 && code[i + 1] == 0x80 && code[i + 2] == 0xBC && code[i + 3] == 0x06)
+                    return *reinterpret_cast<int *>(code + i + 4);
+            }
+        }
+        return 0x31E;
+    }();
+    return off;
+}
+
 static int party_criteria_off()
 {
     static int off = []() -> int {
@@ -165,6 +182,13 @@ bool re::CTFPartyClient::BInQueueForMatchGroup(int type)
 bool re::CTFPartyClient::BInQueueForStandby()
 {
     return *((unsigned char *) this + party_queue_off());
+}
+
+bool re::CTFPartyClient::BQueueRequestPending(int type)
+{
+    if (type < 0 || type > 8)
+        return false;
+    return *((unsigned char *) this + party_pending_off() + type);
 }
 
 char re::CTFPartyClient::RequestLeaveForMatch(int type)

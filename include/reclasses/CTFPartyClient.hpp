@@ -25,6 +25,7 @@ public:
     void RequestLeaveStandby();
     bool BInQueueForStandby();
     bool BInQueueForMatchGroup(int type);
+    bool BQueueRequestPending(int type);
     char RequestLeaveForMatch(int type);
     int BInvitePlayerToParty(CSteamID steamid);
     int BRequestJoinPlayer(CSteamID steamid);
