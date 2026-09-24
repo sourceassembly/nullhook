@@ -33,6 +33,7 @@ enum SharedObjects
     launcher,
     server,
     materialsystem,
+    steamclient,
     // Whatever you do, keep this one last
     entry_count
 };
@@ -51,6 +52,7 @@ public:
     static uintptr_t GetVstdSignature(const char *chPattern);
     static uintptr_t GetServerSignature(const char *chPattern);
     static uintptr_t GetMaterialSystemSignature(const char *chPattern);
+    static uintptr_t GetSteamClientSignature(const char *chPattern);
 };
 
 inline uintptr_t SigAdd(uintptr_t p, intptr_t o)

@@ -171,5 +171,9 @@ uintptr_t CSignature::GetMaterialSystemSignature(const char *chPattern)
 {
     return GetSignature(chPattern, sharedobj::materialsystem(), CSignature_space::materialsystem);
 }
+uintptr_t CSignature::GetSteamClientSignature(const char *chPattern)
+{
+    return GetSignature(chPattern, sharedobj::steamclient(), CSignature_space::steamclient);
+}
 
 CSignature gSignatures;

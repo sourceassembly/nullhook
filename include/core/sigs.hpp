@@ -361,5 +361,10 @@ constexpr int mvm_stats_singleton_offset = 16;
 constexpr const char* mvm_add_local_player_upgrade =
   "55 48 89 E5 41 57 41 89 F7 41 56 41 89 D6 41 55 41 54 53 48 89 FB 48 83 EC 08 44 8B A7 A8 08 00 00";
 
+constexpr const char* sdr_assert_reply_timeouts =
+  "48 8D 15 ? ? ? ? BE 08 1A 00 00 48 8D 3D ? ? ? ? E8 ? ? ? ? 84 C0";
+constexpr const char* sdr_assert_expecting_acks =
+  "48 8D 15 ? ? ? ? BE FF 02 00 00 44 8B 45 ? 48 8D 3D ? ? ? ? 48 8B 4D ? 50 8B 45 ? FF 75 ? 50 8B 45 ? FF 75 ? 50 8B 45 ? FF 75 ? 50 31 C0 41 56 41 57 41 54 E8 ? ? ? ?";
+
 }
 #endif

@@ -1279,9 +1279,16 @@ void update()
     }
 }
 
+static std::unique_ptr<BytePatch> sdr_assert_reply_timeouts;
+static std::unique_ptr<BytePatch> sdr_assert_expecting_acks;
+
 void init()
 {
     // g_IEventManager2->AddListener(&listener(), "player_death", false);
+    sdr_assert_reply_timeouts = std::make_unique<BytePatch>(gSignatures.GetSteamClientSignature, sigs::sdr_assert_reply_timeouts, 0x13, std::vector<unsigned char>{ 0xB0, 0x01, 0x90, 0x90, 0x90 });
+    sdr_assert_expecting_acks = std::make_unique<BytePatch>(gSignatures.GetSteamClientSignature, sigs::sdr_assert_expecting_acks, 0x39, std::vector<unsigned char>{ 0xB0, 0x01, 0x90, 0x90, 0x90 });
+    sdr_assert_reply_timeouts->Patch();
+    sdr_assert_expecting_acks->Patch();
     g_IEventManager2->AddListener(&listener2(), "vote_maps_changed", false);
 }
 
@@ -1296,6 +1303,10 @@ void level_init()
 void shutdown()
 {
     // g_IEventManager2->RemoveListener(&listener());
+    if (sdr_assert_reply_timeouts)
+        sdr_assert_reply_timeouts->Shutdown();
+    if (sdr_assert_expecting_acks)
+        sdr_assert_expecting_acks->Shutdown();
     g_IEventManager2->RemoveListener(&listener2());
 }
 
