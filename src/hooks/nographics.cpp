@@ -77,7 +77,7 @@ static InitRoutine init_nographics(
             },
             "material_cm");
     });
-static bool blacklist_file(const char *&filename)
+static bool blacklist_file(const char *filename)
 {
     const static char *blacklist[] = { ".ani", ".wav", ".mp3", ".vvd", ".vtx", ".vtf", ".vfe", ".cache" /*, ".pcf"*/ };
     if (!filename || !std::strncmp(filename, "materials/console/", 18))
@@ -163,25 +163,29 @@ static int FSHook_ReadFileEx(void *this_, const char *pFileName, const char *pPa
 static void (*FSorig_AddFilesToFileCache)(void *, void *, const char **, int, const char *);
 static void FSHook_AddFilesToFileCache(void *this_, void *cacheId, const char **ppFileNames, int nFileNames, const char *pPathID)
 {
-    fprintf(stderr, "AddFilesToFileCache: %d\n", nFileNames);
+    if (!ppFileNames || nFileNames <= 0)
+    {
+        FSorig_AddFilesToFileCache(this_, cacheId, ppFileNames, nFileNames, pPathID);
+        return;
+    }
+    std::vector<const char *> filtered;
+    filtered.reserve(nFileNames);
     for (int i = 0; i < nFileNames; ++i)
-        fprintf(stderr, "%s\n", ppFileNames[i]);
+    {
+        if (ppFileNames[i] && blacklist_file(ppFileNames[i]))
+            continue;
+        filtered.push_back(ppFileNames[i]);
+    }
+    if (!filtered.empty())
+        FSorig_AddFilesToFileCache(this_, cacheId, filtered.data(), (int) filtered.size(), pPathID);
 }
 
 static int (*FSorig_AsyncReadMultiple)(void *, const char **, int, void *);
 static int FSHook_AsyncReadMultiple(void *this_, const char **pRequests, int nRequests, void *phControls)
 {
-    for (int i = 0; pRequests && i < nRequests; ++i)
-    {
-        // fprintf(stderr, "AsyncReadMultiple %d %s\n", nRequests, pRequests[i]);
-        if (blacklist_file(pRequests[i]))
-        {
-            if (nRequests > 1)
-                fprintf(stderr, "FIXME: blocked AsyncReadMultiple for %d requests due to some filename being blacklisted\n", nRequests);
-            /* FSASYNC_ERR_FILEOPEN */
-            return -1;
-        }
-    }
+    // NB: pRequests is really an array of FSAsyncFileRequest_t, not filenames,
+    // so filtering here would read garbage pointers; failing the whole batch
+    // over one entry would also break legitimate loads. Pass through untouched.
     return FSorig_AsyncReadMultiple(this_, pRequests, nRequests, phControls);
 }
 
@@ -209,16 +213,20 @@ static const char *FSHook_FindFirst(void *this_, const char *pWildCard, void **p
 static bool (*FSorig_Precache)(void *, const char *, const char *);
 static bool FSHook_Precache(void *this_, const char *pFileName, const char *pPathID)
 {
-    (void) this_;
-    (void) pFileName;
-    (void) pPathID;
-    return true;
+    // Only pretend success for files we deliberately skip; legitimate precaches
+    // must really happen or the engine permanently falls back to error assets.
+    if (pFileName && blacklist_file(pFileName))
+        return true;
+    return FSorig_Precache(this_, pFileName, pPathID);
 }
 
 static CatCommand debug_invalidate("invalidate_mdl_cache", "Invalidates MDL cache", []() { g_IBaseClient->InvalidateMdlCache(); });
 
 static hooks::VMTHook fs_hook{}, fs_hook2{};
 static bool hooked_fs = false;
+// BytePatches applied by ReduceRamUsage (registered on first apply so UnHookFs
+// can restore the original bytes when null-graphics is toggled off).
+static std::vector<BytePatch *> ram_patches;
 static void ReduceRamUsage()
 {
     if (!hooked_fs)
@@ -260,11 +268,15 @@ static void ReduceRamUsage()
         particleCreate.Patch();
         particlePrecache.Patch();
         particleCreating.Patch();
+        if (ram_patches.empty())
+            ram_patches = { &playSequence, &particleCreate, &particlePrecache, &particleCreating };
     }
 }
 
 static void UnHookFs()
 {
+    for (BytePatch *patch : ram_patches)
+        patch->Shutdown();
     fs_hook.Release();
     fs_hook2.Release();
     hooked_fs = false;

@@ -36,6 +36,7 @@ private:
     bool m_bInit          = false;
     bool m_bSuccess       = false;
     model_t *m_pLastModel = nullptr;
+    int m_iLastHitboxSet  = -1;
     CachedEntity *parent_ref = nullptr;
 
     uint_fast64_t m_VisCheckValidationFlags = 0;

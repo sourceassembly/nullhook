@@ -4,5 +4,5 @@
 
 namespace setupbones_reconst
 {
-bool SetupBones(IClientEntity *ent, matrix3x4_t *pBoneToWorld, int boneMask);
+bool SetupBones(IClientEntity *ent, matrix3x4_t *pBoneToWorld, int boneMask, float time);
 }

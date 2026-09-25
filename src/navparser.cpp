@@ -46,7 +46,7 @@ static settings::Int aim_speed{ "nav.smooth-speed", "7" };
 static settings::Int vischeck_cache_time{ "nav.vischeck-cache.time", "240" };
 static settings::Boolean vischeck_runtime{ "nav.vischeck-runtime.enabled", "true" };
 static settings::Int vischeck_time{ "nav.vischeck-runtime.delay", "2000" };
-static settings::Int stuck_detect_time{ "nav.anti-stuck.detection-time", "5" };
+static settings::Int stuck_detect_time{ "nav.anti-stuck.detection-time", "3" };
 // How long until accumulated "Stuck time" expires
 static settings::Int stuck_expire_time{ "nav.anti-stuck.expire-time", "10" };
 // How long we should blacklist the node after being stuck for too long?
@@ -759,6 +759,7 @@ static std::string resolveNavPath(const std::string &level_name)
 }
 
 void cancelPath();
+static void resetAntistuckState();
 
 static void ensureMapLoaded()
 {
@@ -781,6 +782,7 @@ static void ensureMapLoaded()
     last_crumb.navarea   = nullptr;
     current_priority     = 0;
     repath_on_fail       = false;
+    resetAntistuckState();
 
     std::string nav_path = resolveNavPath(level_name);
     logging::Info("Pathing: Nav File location: %s", nav_path.c_str());
@@ -863,6 +865,76 @@ static Timer navto_fail_cooldown{};
 static Vector last_failed_dest{};
 static bool have_failed_dest = false;
 
+static Vector antistuck_anchor{};
+static Timer antistuck_window{};
+static bool antistuck_armed         = false;
+static size_t antistuck_last_crumbs = 0;
+static std::vector<Vector> reached_crumb_history;
+
+void abandonPath();
+
+static void resetAntistuckState()
+{
+    antistuck_armed = false;
+    reached_crumb_history.clear();
+}
+
+static void noteCrumbReached(const Crumb &crumb)
+{
+    reached_crumb_history.push_back(crumb.vec);
+    if (reached_crumb_history.size() > 8)
+        reached_crumb_history.erase(reached_crumb_history.begin());
+}
+
+static bool detectCrumbPingPong()
+{
+    if (reached_crumb_history.size() < 6)
+        return false;
+    const auto &h = reached_crumb_history;
+    const size_t n = h.size();
+    const Vector &A = h[n - 6];
+    const Vector &B = h[n - 5];
+    if (A.DistTo(B) < 60.0f)
+        return false;
+    for (int k = 0; k < 3; ++k)
+    {
+        if (h[n - 6 + k * 2].DistTo(A) > 60.0f || h[n - 5 + k * 2].DistTo(B) > 60.0f)
+            return false;
+    }
+    return true;
+}
+
+static int clampedBlacklistTime()
+{
+    int time = *stuck_blacklist_time;
+    if (time < 100)
+        time = 100;
+    else if (time > 500)
+        time = 500;
+    return time;
+}
+
+static void blacklistStuckConnectionAndRepath(const char *reason)
+{
+    if (!map || crumbs.empty())
+        return;
+    CNavArea *from = last_crumb.navarea ? last_crumb.navarea : crumbs[0].navarea;
+    CNavArea *to   = crumbs[0].navarea;
+    if (from && to)
+    {
+        int blacklist_time = clampedBlacklistTime();
+        auto key           = std::pair<CNavArea *, CNavArea *>(from, to);
+        map->vischeck_cache[key].expire_tick    = TICKCOUNT_TIMESTAMP(blacklist_time);
+        map->vischeck_cache[key].vischeck_state = false;
+        map->vischeck_cache[key].stuck          = true;
+        map->connection_stuck_time.erase(key);
+        if (log_pathing)
+            logging::Info("Pathing: antistuck (%s), blacklisted connection %d->%d for %ds", reason, from->m_id, to->m_id, blacklist_time);
+    }
+    resetAntistuckState();
+    abandonPath();
+}
+
 bool navTo(const Vector &destination, int priority, bool should_repath, bool nav_to_local, bool is_repath)
 {
     auto fail = [&](std::string reason)
@@ -900,11 +972,46 @@ bool navTo(const Vector &destination, int priority, bool should_repath, bool nav
         return fail("no dest area found");
     auto path = map->findPath(start_area, dest_area);
     if (path.empty())
+    {
+        const Vector &origin = g_pLocalPlayer->v_Origin;
+        std::pair<float, CNavArea *> best[5];
+        size_t count = 0;
+        for (auto &area : map->navfile.m_areas)
+        {
+            if (&area == start_area || area.m_connections.empty())
+                continue;
+            float d = area.m_center.DistToSqr(origin);
+            if (count < 5)
+            {
+                best[count++] = { d, &area };
+                continue;
+            }
+            size_t worst = 0;
+            for (size_t k = 1; k < 5; ++k)
+                if (best[k].first > best[worst].first)
+                    worst = k;
+            if (d < best[worst].first)
+                best[worst] = { d, &area };
+        }
+        for (size_t i = 0; i < count; ++i)
+        {
+            path = map->findPath(best[i].second, dest_area);
+            if (!path.empty())
+            {
+                start_area = best[i].second;
+                if (log_pathing)
+                    logging::Info("Pathing: navTo recovered via alt start #%d", start_area->m_id);
+                break;
+            }
+        }
+    }
+    if (path.empty())
         return fail(format("pather no path (result ", navdebug.last_solve_result, ", start #", start_area->m_id, " dest #", dest_area->m_id, ")"));
 
     if (!nav_to_local)
         path.erase(path.begin());
     crumbs.clear();
+    resetAntistuckState();
 
     for (size_t i = 0; i < path.size(); ++i)
     {
@@ -976,6 +1083,7 @@ void abandonPath()
     map->pather.Reset();
     crumbs.clear();
     last_crumb.navarea = nullptr;
+    resetAntistuckState();
     // We want to repath on failure
     if (repath_on_fail)
         navTo(last_destination, current_priority, true, current_navtolocal, false);
@@ -991,6 +1099,7 @@ void cancelPath()
     last_crumb.navarea = nullptr;
     current_priority   = 0;
     repath_on_fail     = false;
+    resetAntistuckState();
 }
 
 static Timer last_jump{};
@@ -1063,6 +1172,7 @@ static void followCrumbs()
     if (current_vec.DistTo(g_pLocalPlayer->v_Origin) < crumb_reach(crumbs[0]))
     {
         last_crumb = crumbs[0];
+        noteCrumbReached(crumbs[0]);
         crumbs.erase(crumbs.begin());
         time_spent_on_crumb.update();
         if (!--crumbs_amount)
@@ -1078,6 +1188,8 @@ static void followCrumbs()
     if (crumbs.size() > 1 && crumbs[1].vec.DistTo(g_pLocalPlayer->v_Origin) < crumb_reach(crumbs[1]))
     {
         last_crumb = crumbs[1];
+        noteCrumbReached(crumbs[0]);
+        noteCrumbReached(crumbs[1]);
         crumbs.erase(crumbs.begin(), crumbs.begin() + 2);
         if (crumbs.empty())
             return;
@@ -1300,7 +1412,34 @@ void updateStuckTime()
 {
     // No crumbs
     if (!crumbs.size())
+    {
+        antistuck_armed = false;
         return;
+    }
+    if (!antistuck_armed || crumbs.size() != antistuck_last_crumbs)
+    {
+        antistuck_anchor      = g_pLocalPlayer->v_Origin;
+        antistuck_last_crumbs = crumbs.size();
+        antistuck_window.update();
+        antistuck_armed = true;
+    }
+    else if ((g_pLocalPlayer->v_Origin.AsVector2D() - antistuck_anchor.AsVector2D()).Length() > 50.0f)
+    {
+        antistuck_anchor = g_pLocalPlayer->v_Origin;
+        antistuck_window.update();
+    }
+    else if (antistuck_window.check(*stuck_detect_time * 1000))
+    {
+        blacklistStuckConnectionAndRepath("no net progress");
+        return;
+    }
+
+    if (detectCrumbPingPong())
+    {
+        blacklistStuckConnectionAndRepath("crumb ping-pong");
+        return;
+    }
+
     // We're stuck, add time to connection
     if (inactivity.check(*stuck_time / 2))
     {
@@ -1321,20 +1460,34 @@ void updateStuckTime()
 
         // We are stuck for too long, blastlist node for a while and repath
         if (map->connection_stuck_time[key].time_stuck > TIME_TO_TICKS(*stuck_detect_time))
-        {
-            map->vischeck_cache[key].expire_tick    = TICKCOUNT_TIMESTAMP(*stuck_blacklist_time);
-            map->vischeck_cache[key].vischeck_state = false;
-            map->vischeck_cache[key].stuck          = true;
-            if (log_pathing)
-                logging::Info("Blackisted connection %d->%d", key.first->m_id, key.second->m_id);
-            abandonPath();
-        }
+            blacklistStuckConnectionAndRepath("inactivity");
     }
 }
 
 #if ENABLE_VISUALS
 static void updateDrawSnapshot();
 #endif
+
+static Vector teleport_check_origin{};
+static bool have_teleport_check_origin = false;
+static void checkTeleportReset()
+{
+    const Vector &origin = g_pLocalPlayer->v_Origin;
+    if (!have_teleport_check_origin)
+    {
+        teleport_check_origin       = origin;
+        have_teleport_check_origin  = true;
+        return;
+    }
+    float jumped          = origin.DistTo(teleport_check_origin);
+    teleport_check_origin = origin;
+    if (jumped > 400.0f && isPathing())
+    {
+        if (log_pathing)
+            logging::Info("Pathing: teleport detected (%.0f units), resetting path", jumped);
+        cancelPath();
+    }
+}
 
 static void CreateMove()
 {
@@ -1358,6 +1511,8 @@ static void CreateMove()
         return;
     }
 
+    checkTeleportReset();
+
     if (vischeck_runtime)
         vischeckPath();
     checkBlacklist();
@@ -1378,6 +1533,7 @@ void LevelInit()
 {
     map_dirty = true;
     cancelPath();
+    have_teleport_check_origin = false;
 }
 
 // Return the whole thing

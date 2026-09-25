@@ -28,7 +28,6 @@ struct AimbotTarget_t
     bool valid { false };
 };
 extern settings::Boolean ignore_cloak;
-extern unsigned last_target_ignore_timer;
 // Used to store aimbot data to prevent calculating it again
 // Functions used to calculate aimbot data, and if already calculated use it
 Vector PredictEntity(AimbotTarget_t& entity);

@@ -28,7 +28,6 @@ static settings::Int abandon_if_humans_lte{ "cat-bot.abandon-if.humans-lte", "0"
 static settings::Int abandon_if_players_lte{ "cat-bot.abandon-if.players-lte", "0" };
 static settings::Boolean abandon_if_no_navmesh{ "cat-bot.abandon-if.no-navmesh", "false" };
 static settings::Boolean requeue_without_abandon{ "cat-bot.requeue-without-abandon", "false" };
-static settings::Int requeue_if_ipc_bots_gt{ "cat-bot.requeue-if.ipc-bots-gt", "0" };
 
 static settings::Boolean micspam{ "cat-bot.micspam.enable", "false" };
 static settings::Int micspam_on{ "cat-bot.micspam.interval-on", "3" };
@@ -956,8 +955,11 @@ void smart_crouch()
                 continue;
             bool failedvis = false;
             for (int j = 0; j < 18; j++)
-                if (IsVectorVisible(g_pLocalPlayer->v_Eye, ent->hitboxes.GetHitbox(j)->center))
+            {
+                auto *box = ent->hitboxes.GetHitbox(j);
+                if (box && IsVectorVisible(g_pLocalPlayer->v_Eye, box->center))
                     failedvis = true;
+            }
             if (failedvis)
                 continue;
             for (int j = 0; j < 18; j++)
@@ -1085,8 +1087,6 @@ static bool any_requeue_condition(int count_total, int count_ipc)
     if (abandon_if_players_lte && count_total <= int(abandon_if_players_lte))
         return true;
     if (*abandon_if_no_navmesh && !tfmm::isLoadingMap() && !navparser::NavEngine::hasNavMesh())
-        return true;
-    if (requeue_if_ipc_bots_gt && count_ipc > int(requeue_if_ipc_bots_gt))
         return true;
     return false;
 }
@@ -1257,13 +1257,6 @@ void update()
         if (*abandon_if_no_navmesh && !tfmm::isLoadingMap() && !navparser::NavEngine::hasNavMesh())
         {
             abandon_or_requeue("the current map has no navmesh.");
-            return;
-        }
-        if (requeue_if_ipc_bots_gt && count_ipc > int(requeue_if_ipc_bots_gt))
-        {
-            if (!requeue_active)
-                logging::Info("Requeueing because there are %d IPC bots in game, and requeue-if.ipc-bots-gt is %d, staying in match.", count_ipc, int(requeue_if_ipc_bots_gt));
-            requeueStayingInMatch();
             return;
         }
         if (requeue_active && !any_requeue_condition(count_total, count_ipc))

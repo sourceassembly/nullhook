@@ -109,8 +109,6 @@ int CurrentX, CurrentY;
 float last_mouse_check = 0;
 float stop_moving_time = 0;
 
-// Used to make rapidfire not knock your enemies out of range
-unsigned last_target_ignore_timer = 0;
 settings::Boolean ignore_cloak{ "aimbot.target.ignore-cloaked-spies", "1" };
 // Projectile info
 bool projectile_mode{ false };
@@ -177,7 +175,15 @@ inline int BestHitbox(CachedEntity *target)
     break;
     case 2:
     { // STATIC priority, return a user chosen hitbox
-        return *hitbox;
+        const int chosen = *hitbox;
+        const int count  = target->hitboxes.GetNumHitboxes();
+        if (chosen >= 0 && chosen < count)
+            return chosen;
+        if (hitbox_t::spine_1 < count)
+            return hitbox_t::spine_1;
+        if (count > 0)
+            return 0;
+        return -1;
     }
     break;
     default:
@@ -215,7 +221,9 @@ inline bool shouldBacktrack(CachedEntity *ent)
     return true;
 }
 
-static constexpr unsigned int kBulletTraceMask = 0x4200400B;
+// Engine bullets trace with MASK_SHOT (verified in C_BaseEntity_FireBullets):
+// debris stops bullets, grates do not, and HITBOX enables accurate hitbox tests.
+static constexpr unsigned int kBulletTraceMask = MASK_SHOT;
 
 static bool HitscanPointVisible(CachedEntity *ent, const Vector &point, int hitbox)
 {
@@ -266,7 +274,7 @@ static bool HitscanBestPoint(CachedEntity *ent, int hitbox, Vector &out)
     if (!bones || !hb->bbox)
         return false;
     const int bone = hb->bbox->bone;
-    if (bone < 0)
+    if (bone < 0 || bone >= (int) ent->hitboxes.bones.size())
         return false;
 
     const Vector local_center = (hb->bbox->bbmin + hb->bbox->bbmax) * 0.5f;
@@ -312,10 +320,10 @@ static bool HitscanResolve(AimbotTarget_t &t)
 
     if (ent->m_Type() == ENTITY_PLAYER)
     {
-        int boxes[6];
+        int boxes[9];
         int count = 0;
         auto add  = [&](int hb) {
-            if (hb < 0)
+            if (hb < 0 || count >= 9)
                 return;
             for (int i = 0; i < count; ++i)
             {
@@ -326,11 +334,14 @@ static bool HitscanResolve(AimbotTarget_t &t)
         };
 
         add(t.hitbox);
+        add(hitbox_t::head);
         add(hitbox_t::spine_1);
         add(hitbox_t::pelvis);
         add(hitbox_t::spine_0);
         add(hitbox_t::spine_2);
         add(hitbox_t::spine_3);
+        add(hitbox_t::foot_L);
+        add(hitbox_t::foot_R);
 
         for (int i = 0; i < count; ++i)
         {
@@ -397,6 +408,8 @@ std::vector<Vector> getValidHitpoints(CachedEntity *ent, int hitbox)
     // Recorded vischeckable points
     std::vector<Vector> hitpoints;
     auto hb = ent->hitboxes.GetHitbox(hitbox);
+    if (!hb || !hb->bbox)
+        return hitpoints;
 
     trace_t trace;
 
@@ -409,6 +422,8 @@ std::vector<Vector> getValidHitpoints(CachedEntity *ent, int hitbox)
     auto bboxmin = hb->bbox->bbmin;
     auto bboxmax = hb->bbox->bbmax;
 
+    if (hb->bbox->bone < 0 || hb->bbox->bone >= (int) ent->hitboxes.bones.size())
+        return hitpoints;
     auto transform = ent->hitboxes.GetBones()[hb->bbox->bone];
     QAngle rotation;
     Vector origin;
@@ -437,7 +452,7 @@ std::vector<Vector> getValidHitpoints(CachedEntity *ent, int hitbox)
     // Create combined vector
     std::vector<Vector> positions;
 
-    positions.reserve(sizeof(Vector) * 20);
+    positions.reserve(20);
     positions.insert(positions.end(), corners, &corners[8]);
     positions.insert(positions.end(), line_positions, &line_positions[12]);
 
@@ -457,8 +472,8 @@ std::vector<Vector> getValidHitpoints(CachedEntity *ent, int hitbox)
         {
             return hitpoints;
         }
-        int i                  = 0;
-        const u_int8_t max_box = ent->hitboxes.GetNumHitboxes();
+        int i                 = 0;
+        const uint8_t max_box = ent->hitboxes.GetNumHitboxes();
         while (hitpoints.empty() && i < max_box) // Prevents returning empty at all costs. Loops through every hitbox
         {
             if (hitbox == i)
@@ -476,10 +491,14 @@ std::vector<Vector> getValidHitpoints(CachedEntity *ent, int hitbox)
 std::vector<Vector> getHitpointsVischeck(CachedEntity *ent, int hitbox)
 {
     std::vector<Vector> hitpoints;
-    auto hb      = ent->hitboxes.GetHitbox(hitbox);
+    auto hb = ent->hitboxes.GetHitbox(hitbox);
+    if (!hb || !hb->bbox)
+        return hitpoints;
     auto bboxmin = hb->bbox->bbmin;
     auto bboxmax = hb->bbox->bbmax;
 
+    if (hb->bbox->bone < 0 || hb->bbox->bone >= (int) ent->hitboxes.bones.size())
+        return hitpoints;
     auto transform = ent->hitboxes.GetBones()[hb->bbox->bone];
     QAngle rotation;
     Vector origin;
@@ -508,7 +527,7 @@ std::vector<Vector> getHitpointsVischeck(CachedEntity *ent, int hitbox)
     // Create combined vector
     std::vector<Vector> positions;
 
-    positions.reserve(sizeof(Vector) * 20);
+    positions.reserve(20);
     positions.insert(positions.end(), corners, &corners[8]);
     positions.insert(positions.end(), line_positions, &line_positions[12]);
 
@@ -648,7 +667,10 @@ static void CreateMove()
     }
     // Unless we're using slow aim, we do not want to aim while reloading
     if (*only_can_shoot && !slow_aim && !CanShoot())
+    {
+        target_last.valid = false;
         return;
+    }
 
     doAutoZoom(false);
     if (hacks::tf2::antianticheat::enabled)
@@ -795,6 +817,14 @@ bool hitscanSpecialCases(AimbotTarget_t target_entity, int weapon_case)
             DoAutoshoot(target_entity);
         else
         {
+            // New target: restart the burst delay instead of inheriting a stale count.
+            const int tapfire_ent_idx = target_entity.ent ? target_entity.ent->m_IDX : -1;
+            static int tapfire_ent    = -2;
+            if (tapfire_ent_idx != tapfire_ent)
+            {
+                tapfire_ent   = tapfire_ent_idx;
+                tapfire_delay = 0;
+            }
             // Used to keep track of what tick we're in right now
             tapfire_delay++;
 
@@ -920,9 +950,12 @@ AimbotTarget_t RetrieveBestTarget(bool aimkey_state)
                 return target;
             }
         }
+        else if (target.valid)
+        {
+            // Not backtracking: keep aiming at the locked target.
+            return target;
+        }
     }
-    // No last_target found, reset the timer.
-    hacks::shared::aimbot::last_target_ignore_timer = 0;
 
     float target_highest_score, scr = 0.0f;
     AimbotTarget_t target_best;
@@ -933,7 +966,9 @@ AimbotTarget_t RetrieveBestTarget(bool aimkey_state)
         // Check for null and dormant
         // Check whether the current ent is good enough to target
         AimbotTarget_t target;
-        static std::optional<hacks::tf2::backtrack::BacktrackData> temp_bt_tick = std::nullopt;
+        // NB: must be per-entity, not static: a stale tick from a previous entity
+        // would otherwise be applied to the winner via MoveToTick below.
+        std::optional<hacks::tf2::backtrack::BacktrackData> temp_bt_tick = std::nullopt;
         if (shouldBacktrack(ent))
         {
             auto good_ticks_tmp = tf2::backtrack::getGoodTicks(ent);
@@ -1063,7 +1098,7 @@ AimbotTarget_t GetTarget(CachedEntity *entity)
         // Distance
         is_player             = true;
         float targeting_range = EffectiveTargetingRange();
-        if (entity->m_flDistance() - 40 > targeting_range && tickcount > hacks::shared::aimbot::last_target_ignore_timer) // m_flDistance includes the collision box. You have to subtract it (Should be the same for every model)
+        if (entity->m_flDistance() - 40 > targeting_range) // m_flDistance includes the collision box. You have to subtract it (Should be the same for every model)
             return t;
 
         // Rage only check
@@ -1154,10 +1189,11 @@ AimbotTarget_t GetTarget(CachedEntity *entity)
                 int i = 0;
                 trace_t first_tracer;
 
-                if (!IsEntityVectorVisible(entity, entity->hitboxes.GetHitbox(t.hitbox)->center, true, MASK_SHOT_HULL, &first_tracer, true))
+                auto *preferred_box = entity->hitboxes.GetHitbox(t.hitbox);
+                if (!preferred_box || !IsEntityVectorVisible(entity, preferred_box->center, true, MASK_SHOT_HULL, &first_tracer, true))
                 {
-                    const u_int8_t max_box = entity->hitboxes.GetNumHitboxes();
-                    bool found = false;
+                    const uint8_t max_box = entity->hitboxes.GetNumHitboxes();
+                    bool found            = false;
                     while (i < max_box) // Prevents returning empty at all costs. Loops through every hitbox
                     {
                         if (i == t.hitbox)
@@ -1165,9 +1201,15 @@ AimbotTarget_t GetTarget(CachedEntity *entity)
                             ++i;
                             continue;
                         }
+                        auto *box_i = entity->hitboxes.GetHitbox(i);
+                        if (!box_i)
+                        {
+                            ++i;
+                            continue;
+                        }
                         trace_t test_trace;
 
-                        Vector centered_hitbox = entity->hitboxes.GetHitbox(i)->center;
+                        Vector centered_hitbox = box_i->center;
 
                         if (IsEntityVectorVisible(entity, centered_hitbox, true, MASK_SHOT_HULL, &test_trace, true))
                         {
@@ -1195,14 +1237,11 @@ AimbotTarget_t GetTarget(CachedEntity *entity)
         else if (!entity->m_bEnemy())
             return t;
         // Distance
-        else if (EffectiveTargetingRange())
-        {
-            if (entity->m_flDistance() - 40 > EffectiveTargetingRange() && tickcount > hacks::shared::aimbot::last_target_ignore_timer)
-                return t;
-        }
+        if (entity->m_flDistance() - 40 > EffectiveTargetingRange())
+            return t;
 
         // Building type
-        else if (!(buildings_other && buildings_sentry))
+        if (!(buildings_other && buildings_sentry))
         {
             // Check if target is a sentrygun
             if (entity->m_iClassID() == CL_CLASS(CObjectSentrygun))
@@ -1235,7 +1274,7 @@ AimbotTarget_t GetTarget(CachedEntity *entity)
         // Distance
         float targeting_range = EffectiveTargetingRange();
 
-        if (entity->m_flDistance() - 40 > targeting_range && tickcount > hacks::shared::aimbot::last_target_ignore_timer)
+        if (entity->m_flDistance() - 40 > targeting_range)
             return t;
 
         t.valid = true;
@@ -1392,7 +1431,12 @@ bool Aim(AimbotTarget_t target)
         g_pLocalPlayer->bUseSilentAngles = true;
     // Set tick count to targets (backtrack messes with this)
     if (!shouldBacktrack(target.ent) && nolerp && target.ent->m_IDX <= g_IEngine->GetMaxClients())
-        current_user_cmd->tick_count = TIME_TO_TICKS(CE_FLOAT(target.ent, netvar.m_flSimulationTime));
+    {
+        const int target_tick = TIME_TO_TICKS(CE_FLOAT(target.ent, netvar.m_flSimulationTime));
+        // Never emit a tick the server would reject outright.
+        if (abs(target_tick - current_user_cmd->tick_count) <= TIME_TO_TICKS(0.2f))
+            current_user_cmd->tick_count = target_tick;
+    }
     aimed_this_tick      = true;
     viewangles_this_tick = angles;
     // Finish function
@@ -1483,7 +1527,7 @@ void DoAutoshoot(AimbotTarget_t target)
             attack = false;
     }
 
-    else if (slow_aim && !slow_can_shoot && g_pLocalPlayer->weapon_mode != weapon_hitscan)
+    else if (slow_aim && !slow_can_shoot)
         attack = false;
 
     // Dont autoshoot without anything in clip
@@ -1546,13 +1590,19 @@ Vector PredictEntity(AimbotTarget_t& target)
                 // Allow multipoint logic to run
                 if (!*multipoint)
                 {
-                    result = target.ent->hitboxes.GetHitbox(target.hitbox)->center;
+                    auto *box = target.ent->hitboxes.GetHitbox(target.hitbox);
+                    result    = box ? box->center : target.ent->m_vecOrigin();
                     break;
                 }
 
                 std::optional<Vector> best_pos = getBestHitpoint(target.ent, target.hitbox);
                 if (best_pos)
                     result = *best_pos;
+                else
+                {
+                    auto *box = target.ent->hitboxes.GetHitbox(target.hitbox);
+                    result    = box ? box->center : target.ent->m_vecOrigin();
+                }
             }
         }
         break;
@@ -1572,7 +1622,10 @@ Vector PredictEntity(AimbotTarget_t& target)
         // NPCs (Skeletons, merasmus, etc)
     case ENTITY_NPC:
     {
-        result = target.ent->hitboxes.GetHitbox(std::max(0, target.ent->hitboxes.GetNumHitboxes() / 2 - 1))->center;
+        {
+            auto *box = target.ent->hitboxes.GetHitbox(std::max(0, target.ent->hitboxes.GetNumHitboxes() / 2 - 1));
+            result    = box ? box->center : target.ent->m_vecOrigin();
+        }
         break;
     }
 
@@ -1697,7 +1750,10 @@ int ClosestHitbox(CachedEntity *target)
     closest_fov = 256;
     for (int i = 0; i < target->hitboxes.GetNumHitboxes(); ++i)
     {
-        fov = GetFov(g_pLocalPlayer->v_OrigViewangles, g_pLocalPlayer->v_Eye, target->hitboxes.GetHitbox(i)->center);
+        auto *box = target->hitboxes.GetHitbox(i);
+        if (!box)
+            continue;
+        fov = GetFov(g_pLocalPlayer->v_OrigViewangles, g_pLocalPlayer->v_Eye, box->center);
         if (fov < closest_fov || closest == -1)
         {
             closest     = i;
@@ -1711,7 +1767,10 @@ int ClosestHitbox(CachedEntity *target)
 // angle, effectively slowing the aiming process
 void DoSlowAim(Vector &input_angle)
 {
-    auto viewangles   = current_user_cmd->viewangles;
+    auto viewangles = current_user_cmd->viewangles;
+    // input_angle is punch-compensated: interpolate in the same space.
+    if (netvar.vecPunchAngle)
+        viewangles -= CE_VECTOR(LOCAL_E, netvar.vecPunchAngle);
     Vector slow_delta = { 0, 0, 0 };
 
     // Don't bother if we're already on target

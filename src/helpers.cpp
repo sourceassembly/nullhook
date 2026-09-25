@@ -1523,8 +1523,10 @@ Vector CalcAngle(Vector src, Vector dst)
     float hyp;
     delta       = src - dst;
     hyp         = sqrtf((delta.x * delta.x) + (delta.y * delta.y)); // SUPER SECRET IMPROVEMENT CODE NAME DONUT STEEL
+    if (hyp == 0.0f && delta.z == 0.0f)
+        return Vector(0.0f, 0.0f, 0.0f);
     AimAngles.x = atanf(delta.z / hyp) * RADPI;
-    AimAngles.y = atanf(delta.y / delta.x) * RADPI;
+    AimAngles.y = (delta.x == 0.0f && delta.y == 0.0f) ? 0.0f : atanf(delta.y / delta.x) * RADPI;
     AimAngles.z = 0.0f;
     if (delta.x >= 0.0)
         AimAngles.y += 180.0f;
@@ -1545,21 +1547,24 @@ void MakeVector(Vector angle, Vector &vector)
 float GetFov(Vector angle, Vector src, Vector dst)
 {
     Vector ang, aim;
-    float mag, u_dot_v;
     ang = CalcAngle(src, dst);
 
     MakeVector(angle, aim);
     MakeVector(ang, ang);
 
-    mag     = sqrtf(pow(aim.x, 2) + pow(aim.y, 2) + pow(aim.z, 2));
-    u_dot_v = aim.Dot(ang);
+    const float mag_sq = aim.x * aim.x + aim.y * aim.y + aim.z * aim.z;
+    if (!(mag_sq > 0.0f))
+        return 0.0f;
+    const float cos_angle = aim.Dot(ang) / mag_sq;
 
-    // Congratulations! you managed to go out of domain. That means you are directly on the target
-    // And floating point inprecision breaks this function making it return NAN, so we "fix" it via this.
-    if (u_dot_v / (pow(mag, 2)) > 1.0f)
-        return 0;
+    // Clamp both sides of acos()'s domain: floating point error can push the
+    // quotient out of [-1, 1] and produce a NaN that would bypass FOV checks.
+    if (cos_angle >= 1.0f)
+        return 0.0f;
+    if (cos_angle <= -1.0f)
+        return 180.0f;
 
-    return RAD2DEG(acos(u_dot_v / (pow(mag, 2))));
+    return RAD2DEG(acos(cos_angle));
 }
 
 bool CanHeadshot()

@@ -25,16 +25,23 @@ void EntityHitboxCache::Init()
     model = (model_t *) EntGetModel(RAW_ENT(parent_ref));
     if (!model)
         return;
-    if (!m_bModelSet || model != m_pLastModel)
+    // NB: the hitbox set index can change while the model stays the same, and
+    // studiohdr_t::pHitboxSet() does not range-check (assert-only), so validate
+    // the index explicitly before trusting the returned pointer.
+    const int hitbox_set = CE_INT(parent_ref, netvar.iHitboxSet);
+    if (!m_bModelSet || model != m_pLastModel || hitbox_set != m_iLastHitboxSet)
     {
         shdr = g_IModelInfo->GetStudiomodel(model);
         if (!shdr)
             return;
-        set = shdr->pHitboxSet(CE_INT(parent_ref, netvar.iHitboxSet));
+        if (hitbox_set < 0 || hitbox_set >= shdr->numhitboxsets)
+            return;
+        set = shdr->pHitboxSet(hitbox_set);
         if (!set)
             return;
-        m_pLastModel   = model;
-        m_nNumHitboxes = 0;
+        m_pLastModel     = model;
+        m_iLastHitboxSet = hitbox_set;
+        m_nNumHitboxes   = 0;
         if (set)
         {
             m_nNumHitboxes = set->numhitboxes;
@@ -52,7 +59,7 @@ bool EntityHitboxCache::VisibilityCheck(int id)
 
     if (!m_bInit)
         Init();
-    if (id < 0 || id >= m_nNumHitboxes)
+    if (id < 0 || id >= m_nNumHitboxes || id >= 64)
         return false;
     if (!m_bSuccess)
         return false;
@@ -71,7 +78,7 @@ bool EntityHitboxCache::VisibilityCheck(int id)
     return (m_VisCheck >> id) & 1;
 }
 
-static settings::Int setupbones_time{ "source.setupbones-time", "2" };
+static settings::Int setupbones_time{ "source.setupbones-time", "3" };
 
 void EntityHitboxCache::UpdateBones()
 {
@@ -93,7 +100,9 @@ void EntityHitboxCache::UpdateBones()
     static auto studio_get_bone_cache           = (GetBoneCache_t) gSignatures.GetClientSignature(sigs::studio_get_bone_cache);
     static auto bone_cache_update_bones         = (BoneCacheUpdateBones_t) gSignatures.GetClientSignature(sigs::studio_bone_cache_update_bones);
 
-    if (!hitbox_bone_cache_handle_offset || !studio_get_bone_cache || !bone_cache_update_bones)
+    // Sanity-check the signature-derived offset: a stale signature must not turn
+    // into an arbitrary out-of-bounds entity read.
+    if (!hitbox_bone_cache_handle_offset || hitbox_bone_cache_handle_offset > 0x10000 || !studio_get_bone_cache || !bone_cache_update_bones)
         return;
     auto hitbox_bone_cache_handle = CE_VAR(parent_ref, hitbox_bone_cache_handle_offset, uintptr_t);
     if (hitbox_bone_cache_handle)
@@ -127,6 +136,10 @@ matrix3x4_t *EntityHitboxCache::GetBones(int numbones)
     case 3:
         if (CE_GOOD(parent_ref))
             bones_setup_time = CE_FLOAT(parent_ref, netvar.m_flSimulationTime);
+        break;
+    default:
+        bones_setup_time = g_GlobalVars->curtime;
+        break;
     }
     if (!bones_setup)
     {
@@ -166,10 +179,21 @@ matrix3x4_t *EntityHitboxCache::GetBones(int numbones)
             {
                 const model_t *mdl = EntGetModel(raw);
                 studiohdr_t *shdr  = (mdl && g_IModelInfo) ? g_IModelInfo->GetStudiomodel(mdl) : nullptr;
+                // Models with include-models go through the reconstruction: it only
+                // needs the studiohdr, while engine SetupBones can fail when merged
+                // wearables are unavailable (dormant/textmode entities).
                 if (shdr && shdr->numincludemodels > 0)
-                    bones_setup = setupbones_reconst::SetupBones(raw, bones.data(), 0x7FF00);
-                else if (overlay_ok && shdr)
-                    bones_setup = EntSetupBones(raw, bones.data(), numbones, 0x7FF00, bones_setup_time);
+                    bones_setup = setupbones_reconst::SetupBones(raw, bones.data(), 0x7FF00, bones_setup_time);
+                else if (shdr)
+                {
+                    if (overlay_ok)
+                        bones_setup = EntSetupBones(raw, bones.data(), numbones, 0x7FF00, bones_setup_time);
+                    else
+                        // No anim layers allocated yet (e.g. just spawned): the
+                        // reconstruction tolerates missing layers, so use it instead
+                        // of leaving zero matrices behind.
+                        bones_setup = setupbones_reconst::SetupBones(raw, bones.data(), 0x7FF00, bones_setup_time);
+                }
             }
         }
     }
@@ -178,8 +202,15 @@ matrix3x4_t *EntityHitboxCache::GetBones(int numbones)
 
 CachedHitbox *EntityHitboxCache::GetHitbox(int id)
 {
+    // Validate before any bit shift: negative or huge ids are UB for >>/<<.
+    if (id < 0 || id >= 64)
+        return nullptr;
     if ((m_CacheValidationFlags >> id) & 1)
+    {
+        if (id >= (int) m_CacheInternal.size())
+            return nullptr;
         return &m_CacheInternal[id];
+    }
     mstudiobbox_t *box;
 
     if (!m_bInit)
@@ -196,18 +227,28 @@ CachedHitbox *EntityHitboxCache::GetHitbox(int id)
     auto shdr = g_IModelInfo->GetStudiomodel(model);
     if (!shdr)
         return nullptr;
-    auto set = shdr->pHitboxSet(CE_INT(parent_ref, netvar.iHitboxSet));
+    const int hitbox_set = CE_INT(parent_ref, netvar.iHitboxSet);
+    if (hitbox_set < 0 || hitbox_set >= shdr->numhitboxsets)
+        return nullptr;
+    auto set = shdr->pHitboxSet(hitbox_set);
     if (!set)
         return nullptr;
-    if (m_nNumHitboxes > m_CacheInternal.size())
+    if (id >= set->numhitboxes)
+        return nullptr;
+    if (m_nNumHitboxes > (int) m_CacheInternal.size())
         m_CacheInternal.resize(m_nNumHitboxes);
     box = set->pHitbox(id);
     if (!box)
         return nullptr;
     if (box->bone < 0 || box->bone >= MAXSTUDIOBONES)
         return nullptr;
-    VectorTransform(box->bbmin, GetBones(shdr->numbones)[box->bone], m_CacheInternal[id].min);
-    VectorTransform(box->bbmax, GetBones(shdr->numbones)[box->bone], m_CacheInternal[id].max);
+    matrix3x4_t *bone_mats = GetBones(shdr->numbones);
+    // Never serve hitboxes transformed by missing/failed bones (zero matrices
+    // would collapse every hitbox to the world origin).
+    if (!bones_setup || !bone_mats || box->bone >= (int) bones.size())
+        return nullptr;
+    VectorTransform(box->bbmin, bone_mats[box->bone], m_CacheInternal[id].min);
+    VectorTransform(box->bbmax, bone_mats[box->bone], m_CacheInternal[id].max);
     m_CacheInternal[id].bbox   = box;
     m_CacheInternal[id].center = (m_CacheInternal[id].min + m_CacheInternal[id].max) / 2;
     m_CacheValidationFlags |= 1ULL << id;

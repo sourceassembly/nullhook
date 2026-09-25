@@ -1,6 +1,7 @@
 #include "common.hpp"
 #include "Backtrack.hpp"
 #include "AntiCheatBypass.hpp"
+#include <hacks/Aimbot.hpp>
 
 namespace hacks::tf2::backtrack
 {
@@ -110,7 +111,7 @@ bool isTickInRange(int tickcount)
     if (!hacks::tf2::antianticheat::enabled)
         return TICKS_TO_TIME(delta_tickcount) <= 0.2f - TICKS_TO_TIME(2);
     else
-        return delta_tickcount <= TICKS_TO_TIME(1);
+        return delta_tickcount <= 1;
 }
 
 // Is backtrack enabled?
@@ -176,7 +177,7 @@ void adjustPing(INetChannel *ch)
 }
 
 // Move target entity to tick
-void MoveToTick(BacktrackData data)
+void MoveToTick(const BacktrackData &data)
 {
     if (IDX_BAD(data.entidx) || data.entidx > g_IEngine->GetMaxClients())
         return;
@@ -192,13 +193,18 @@ void MoveToTick(BacktrackData data)
     // Need to reconstruct a bunch of data
     target->hitboxes.InvalidateCache();
 
-    // Mark all the hitboxes as valid so we don't recalc them and use the old data
-    // We already have
+    // Reuse the recorded hitboxes instead of recalculating them, but only flag
+    // entries that actually contain a hitbox (recorded nulls stay invalid so
+    // they get recomputed instead of serving zero data with a null bbox).
     target->hitboxes.m_CacheInternal.resize(data.hitboxes.size());
-    // Sets bits 1-18 (Or array indicies 0-17 if this was an array)
-    target->hitboxes.m_CacheValidationFlags |= 262143ULL;
-    for (int i = hitbox_t::head; i <= foot_R; ++i)
-        target->hitboxes.m_CacheInternal.at(i)     = data.hitboxes.at(i);
+    for (size_t i = 0; i < data.hitboxes.size() && i < 64; ++i)
+    {
+        target->hitboxes.m_CacheInternal.at(i) = data.hitboxes.at(i);
+        if (data.hitboxes.at(i).bbox)
+            target->hitboxes.m_CacheValidationFlags |= 1ULL << i;
+        else
+            target->hitboxes.m_CacheValidationFlags &= ~(1ULL << i);
+    }
 
     // Sync animation properly
     CE_FLOAT(target, netvar.m_flSimulationTime) = data.simtime;
@@ -217,7 +223,7 @@ void MoveToTick(BacktrackData data)
     static auto studio_get_bone_cache           = (GetBoneCache_t) gSignatures.GetClientSignature(sigs::studio_get_bone_cache);
     static auto bone_cache_update_bones         = (BoneCacheUpdateBones_t) gSignatures.GetClientSignature(sigs::studio_bone_cache_update_bones);
 
-    if (!hitbox_bone_cache_handle_offset || !studio_get_bone_cache || !bone_cache_update_bones)
+    if (!hitbox_bone_cache_handle_offset || hitbox_bone_cache_handle_offset > 0x10000 || !studio_get_bone_cache || !bone_cache_update_bones)
         return;
     auto hitbox_bone_cache_handle = CE_VAR(target, hitbox_bone_cache_handle_offset, uintptr_t);
     if (hitbox_bone_cache_handle)
@@ -340,8 +346,10 @@ static void CreateMoveLate()
     if (CE_BAD(LOCAL_E) || HasCondition<TFCond_HalloweenGhostMode>(LOCAL_E) || !LOCAL_E->m_bAlivePlayer())
         return;
 
-    // No data set yet, try to get nearest to cursor
-    if (!set_data && !g_pLocalPlayer->bUseSilentAngles)
+    // No data set yet, try to get nearest to cursor. When the aimbot already aimed
+    // this tick, its own tick selection (or live aim) wins: overwriting the tick
+    // with some other entity's history would validate the shot against the wrong tick.
+    if (!set_data && !g_pLocalPlayer->bUseSilentAngles && !hacks::shared::aimbot::isAiming())
     {
         float cursor_distance = FLT_MAX;
         for (auto const &ent_data : bt_data)

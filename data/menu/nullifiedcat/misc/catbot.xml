@@ -74,13 +74,11 @@
     <Box name="Utilities" width="content" height="content" padding="12 6 6 6" x="215">
         <List width="200">
             <AutoVariable width="fill" target="cat-bot.enable" label="Enable utilities"/>
-            <AutoVariable width="fill" target="cat-bot.abandon-if.bots-gte" label="Abandon if bots Gte"/>
             <AutoVariable width="fill" target="cat-bot.abandon-if.ipc-bots-gte" label="Abandon if IPC bots Gte"/>
             <AutoVariable width="fill" target="cat-bot.abandon-if.humans-lte" label="Abandon if humans Lte"/>
             <AutoVariable width="fill" target="cat-bot.abandon-if.players-lte" label="Abandon if players Lte"/>
             <AutoVariable width="fill" target="cat-bot.abandon-if.no-navmesh" label="Abandon if no navmesh"/>
             <AutoVariable width="fill" target="cat-bot.requeue-without-abandon" label="Requeue without abandon" tooltip="When an abandon-if condition fires, queue for the next match instead of abandoning, staying in the current match. The queue is cancelled if the match becomes acceptable again."/>
-            <AutoVariable width="fill" target="cat-bot.requeue-if.ipc-bots-gt" label="RQ if IPC bots Gt" tooltip="Queue for the next match while more than N IPC bots are in game (stays in current match). Cancels the queue when the count drops back."/>
             <AutoVariable width="fill" target="misc.auto-abandon" label="Auto abandon on disconnect" tooltip="When you disconnect, also abandon the matchmaking assignment so you can requeue. Skipped for anti-autobalance reconnects."/>
             <AutoVariable width="fill" target="cat-bot.auto-crouch" label="Autocrouch"/>
             <AutoVariable width="fill" target="cat-bot.mark-human-after-kills" label="Mark human after kills"/>

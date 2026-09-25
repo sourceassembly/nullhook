@@ -222,7 +222,11 @@ void QueueWireframeHitboxes(hitbox_cache::EntityHitboxCache &hb_cache)
 {
     for (int i = 0; i < hb_cache.GetNumHitboxes(); ++i)
     {
-        auto hb        = hb_cache.GetHitbox(i);
+        auto hb = hb_cache.GetHitbox(i);
+        if (!hb || !hb->bbox)
+            continue;
+        if (hb->bbox->bone < 0 || hb->bbox->bone >= (int) hb_cache.bones.size())
+            continue;
         Vector raw_min = hb->bbox->bbmin;
         Vector raw_max = hb->bbox->bbmax;
         auto transform = hb_cache.GetBones()[hb->bbox->bone];

@@ -43,7 +43,7 @@ extern settings::Float latency;
 void adjustPing(INetChannel *ch);
 bool backtrackEnabled();
 bool isTickInRange(int tickcount);
-void MoveToTick(BacktrackData data);
+void MoveToTick(const BacktrackData &data);
 void RestoreEntity(int entidx);
 bool hasData();
 std::optional<BacktrackData> getData();

@@ -125,7 +125,9 @@ int BulletDangerValue(CachedEntity *patient)
                     return 2;
                 else
                 {
-                    if (GetFov(ent->m_vecAngle(), ent->hitboxes.GetHitbox(head)->center, patient->hitboxes.GetHitbox(head)->center) < *vacc_sniper_fov)
+                    auto *ent_head     = ent->hitboxes.GetHitbox(head);
+                    auto *patient_head = patient->hitboxes.GetHitbox(head);
+                    if (ent_head && patient_head && GetFov(ent->m_vecAngle(), ent_head->center, patient_head->center) < *vacc_sniper_fov)
                         return 2;
                 }
             }

@@ -1223,11 +1223,7 @@ void updateEnemyBlacklist(int slot)
             continue;
 
         bool is_dormant = CE_BAD(ent);
-        // Should not run on dormant and entity is dormant, ignore.
-        if (!should_run_dormant && is_dormant)
-            continue;
-        // Should not run on normal entity and entity is not dormant, ignore
-        else if (!should_run_normal && !is_dormant)
+        if (!should_run_dormant || !is_dormant)
             continue;
 
         // Avoid excessive calls by ignoring new checks if people are too close to eachother
@@ -1385,12 +1381,8 @@ bool stayNearTarget(CachedEntity *ent)
     else
         std::sort(good_areas.begin(), good_areas.end(), [](std::pair<CNavArea *, float> a, std::pair<CNavArea *, float> b) { return a.second < b.second; });
 
-    int vischecks = 0;
     for (auto &area : good_areas)
     {
-        if (vischecks >= 24)
-            break;
-        vischecks++;
         if (!isAreaValidForStayNear(*ent_origin, area.first, false, true))
             continue;
         if (navparser::NavEngine::navTo(area.first->m_center, staynear, true, !navparser::NavEngine::isPathing()))
@@ -1402,7 +1394,7 @@ bool stayNearTarget(CachedEntity *ent)
 // A bunch of basic checks to ensure we don't try to target an invalid entity
 bool isStayNearTargetValid(CachedEntity *ent)
 {
-    return CE_VALID(ent) && g_pPlayerResource->isAlive(ent->m_IDX) && ent->m_IDX != g_pLocalPlayer->entity_idx && g_pLocalPlayer->team != ent->m_iTeam() && player_tools::shouldTarget(ent) && !IsPlayerInvisible(ent) && !IsPlayerInvulnerable(ent);
+    return CE_VALID(ent) && g_pPlayerResource->isAlive(ent->m_IDX) && ent->m_IDX != g_pLocalPlayer->entity_idx && g_pLocalPlayer->team != ent->m_iTeam() && player_tools::shouldTarget(ent) && !IsPlayerInvulnerable(ent);
 }
 
 // Recursive function to find hiding spot
@@ -2118,7 +2110,7 @@ bool doRoam()
     static Timer roam_timer;
     // Don't path constantly
     if (!roam_timer.test_and_set(2000))
-        return false;
+        return navparser::NavEngine::current_priority == patrol && navparser::NavEngine::isPathing();
 
     if (defend_while_patrolling)
     {
@@ -2145,15 +2137,84 @@ bool doRoam()
         return false;
     // Don't overwrite current roam
     if (navparser::NavEngine::current_priority == patrol)
+        return navparser::NavEngine::isPathing();
+
+    static std::vector<size_t> visited_areas;
+    static Vector failed_spot{};
+    static Timer failed_spot_timer{};
+    static float ground_ceiling     = FLT_MAX;
+    static std::string ceiling_map;
+    const Vector &origin = g_pLocalPlayer->v_Origin;
+    auto &areas          = navparser::NavEngine::getNavFile()->m_areas;
+    if (areas.empty())
         return false;
-    // Max 10 attempts
-    for (int attempts = 0; attempts < 10; ++attempts)
+
     {
-        // Get a random sniper spot
-        auto random = select_randomly(sniper_spots.begin(), sniper_spots.end());
-        // Try to nav there
-        if (navparser::NavEngine::navTo(*random, patrol))
+        std::string level = GetLevelName();
+        if (level != ceiling_map)
+        {
+            std::vector<float> heights;
+            heights.reserve(areas.size());
+            for (auto &area : areas)
+                heights.emplace_back(area.m_center.z);
+            std::nth_element(heights.begin(), heights.begin() + heights.size() / 2, heights.end());
+            ground_ceiling = heights[heights.size() / 2] + 96.0f;
+            ceiling_map    = std::move(level);
+            visited_areas.clear();
+            failed_spot_timer.last -= std::chrono::seconds(60);
+        }
+    }
+
+    auto build_candidates = [&](bool enforce_ceiling)
+    {
+        std::vector<size_t> out;
+        out.reserve(areas.size());
+        for (size_t i = 0; i < areas.size(); ++i)
+        {
+            const Vector &center = areas[i].m_center;
+            if (std::find(visited_areas.begin(), visited_areas.end(), i) != visited_areas.end())
+                continue;
+            if (enforce_ceiling && center.z > ground_ceiling)
+                continue;
+            float dz = center.z - origin.z;
+            if (dz > 64.0f || dz < -1024.0f)
+                continue;
+            if (center.DistToSqr(origin) < 200.0f * 200.0f)
+                continue;
+            if (!failed_spot_timer.check(30000) && center.DistTo(failed_spot) < 100.0f)
+                continue;
+            out.emplace_back(i);
+        }
+        return out;
+    };
+
+    auto candidates = build_candidates(true);
+    if (candidates.empty())
+    {
+        visited_areas.clear();
+        candidates = build_candidates(true);
+        if (candidates.empty())
+        {
+            candidates = build_candidates(false);
+            if (candidates.empty())
+                return false;
+        }
+    }
+    // Max 10 attempts
+    for (int attempts = 0; attempts < 10 && !candidates.empty(); ++attempts)
+    {
+        auto random = select_randomly(candidates.begin(), candidates.end());
+        size_t idx  = *random;
+        candidates.erase(random);
+        if (navparser::NavEngine::navTo(areas[idx].m_center, patrol))
+        {
+            visited_areas.emplace_back(idx);
+            if (visited_areas.size() > 16)
+                visited_areas.erase(visited_areas.begin());
             return true;
+        }
+        failed_spot = areas[idx].m_center;
+        failed_spot_timer.update();
     }
 
     return false;
